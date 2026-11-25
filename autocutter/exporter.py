@@ -18,9 +18,18 @@ from .models import (
     LayoutGeometry,
     LayoutSettings,
     PartSegment,
+    SubtitleCue,
+    SubtitleSettings,
     VideoInfo,
     compute_layout_geometry,
     sanitize_filename,
+)
+from .subtitles import (
+    escape_ffmpeg_filter_path,
+    load_subtitle_cues,
+    slice_cues_for_part,
+    write_part_ass_file,
+    write_part_srt_file,
 )
 
 
@@ -61,6 +70,8 @@ def build_ffmpeg_command(
     top_png_path: Optional[Path],
     bottom_png_path: Optional[Path],
     badge_png_path: Optional[Path],
+    burn_ass_path: Optional[Path] = None,
+    soft_srt_path: Optional[Path] = None,
 ) -> list[str]:
     cmd: list[str] = [
         ffmpeg_exe,
@@ -80,6 +91,7 @@ def build_ffmpeg_command(
     top_idx: Optional[int] = None
     bottom_idx: Optional[int] = None
     badge_idx: Optional[int] = None
+    soft_sub_idx: Optional[int] = None
 
     if top_png_path is not None:
         cmd.extend(["-i", str(top_png_path)])
@@ -94,6 +106,11 @@ def build_ffmpeg_command(
     if badge_png_path is not None:
         cmd.extend(["-i", str(badge_png_path)])
         badge_idx = input_idx
+        input_idx += 1
+
+    if soft_srt_path is not None:
+        cmd.extend(["-i", str(soft_srt_path)])
+        soft_sub_idx = input_idx
         input_idx += 1
 
     filters: list[str] = []
@@ -149,6 +166,12 @@ def build_ffmpeg_command(
         )
         stage = next_s
 
+    if burn_ass_path is not None:
+        next_s = stage + 1
+        escaped_ass = escape_ffmpeg_filter_path(burn_ass_path)
+        filters.append(f"[s{stage}]ass='{escaped_ass}'[s{next_s}]")
+        stage = next_s
+
     if badge_idx is not None:
         next_s = stage + 1
         filters.append(f"[{badge_idx}:v]format=rgba[bdg_ov]")
@@ -164,6 +187,18 @@ def build_ffmpeg_command(
         cmd.extend(["-map", "0:a:0?", "-c:a", "aac", "-b:a", export_settings.audio_bitrate])
     else:
         cmd.append("-an")
+
+    if soft_sub_idx is not None:
+        cmd.extend(
+            [
+                "-map",
+                f"{soft_sub_idx}:s:0",
+                "-c:s",
+                "mov_text",
+                "-metadata:s:s:0",
+                "language=eng",
+            ]
+        )
 
     cmd.extend(
         [
@@ -194,6 +229,7 @@ def export_parts(
     layout: LayoutSettings,
     badge: BadgeSettings,
     export_settings: ExportSettings,
+    subtitles: Optional[SubtitleSettings] = None,
     cancel_event: Optional[threading.Event] = None,
     on_part_start: Optional[Callable[[PartSegment, Path], None]] = None,
     on_part_progress: Optional[Callable[[PartSegment, float, str], None]] = None,
@@ -213,6 +249,15 @@ def export_parts(
     selected_parts = [p for p in parts if p.selected]
     if not selected_parts:
         return []
+
+    all_cues: list[SubtitleCue] = []
+    if subtitles and subtitles.enabled and subtitles.path:
+        all_cues = load_subtitle_cues(subtitles.path)
+        if on_log:
+            on_log(
+                f"Loaded {len(all_cues)} subtitle cues from {subtitles.path.name} "
+                f"(mode: {subtitles.mode})"
+            )
 
     with tempfile.TemporaryDirectory(prefix="autocutter_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
@@ -264,6 +309,29 @@ def export_parts(
                 badge_png_path = tmp_dir / f"badge_{part.index}.png"
                 badge_img.save(badge_png_path, format="PNG")
 
+            burn_ass_path: Optional[Path] = None
+            soft_srt_path: Optional[Path] = None
+            if subtitles and subtitles.enabled and all_cues:
+                part_cues = slice_cues_for_part(
+                    all_cues,
+                    part_start_sec=part.start_sec,
+                    part_end_sec=part.end_sec,
+                    sync_offset_sec=subtitles.time_offset_sec,
+                )
+                if part_cues:
+                    if subtitles.mode in ("burn", "both"):
+                        burn_ass_path = write_part_ass_file(
+                            part_cues,
+                            tmp_dir / f"sub_{part.index}.ass",
+                            subtitles,
+                            geometry,
+                        )
+                    if subtitles.mode in ("soft", "both"):
+                        soft_srt_path = write_part_srt_file(
+                            part_cues,
+                            tmp_dir / f"sub_{part.index}.srt",
+                        )
+
             cmd = build_ffmpeg_command(
                 ffmpeg_exe=ffmpeg_exe,
                 video_info=video_info,
@@ -275,6 +343,8 @@ def export_parts(
                 top_png_path=top_png_path,
                 bottom_png_path=bottom_png_path,
                 badge_png_path=badge_png_path,
+                burn_ass_path=burn_ass_path,
+                soft_srt_path=soft_srt_path,
             )
 
             if on_log:

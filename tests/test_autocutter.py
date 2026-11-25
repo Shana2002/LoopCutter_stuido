@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ from autocutter.compositor import (
     fit_image_to_box,
     render_badge_overlay,
     render_preview_frame,
+    render_subtitle_overlay,
 )
 from autocutter.exporter import export_parts
 from autocutter.media_probe import extract_frame_png, find_executable, probe_video
@@ -20,10 +22,16 @@ from autocutter.models import (
     BadgeSettings,
     ExportSettings,
     LayoutSettings,
+    SubtitleSettings,
     calculate_parts,
     compute_layout_geometry,
     format_part_label,
     format_timestamp,
+)
+from autocutter.subtitles import (
+    find_active_cue_text,
+    load_subtitle_cues,
+    slice_cues_for_part,
 )
 
 
@@ -208,6 +216,130 @@ def test_end_to_end_ffmpeg_export_720p_9_16(tmp_path: Path) -> None:
     assert solid_exported[0].status == "Done"
     solid_info = probe_video(solid_exported[0].output_path)  # type: ignore[arg-type]
     assert (solid_info.width, solid_info.height) == (720, 1280)
+
+
+def test_subtitle_parsing_and_part_slicing(tmp_path: Path) -> None:
+    srt_path = tmp_path / "movie.srt"
+    srt_path.write_text(
+        "1\n00:00:01,000 --> 00:00:04,000\nFirst line\n\n"
+        "2\n00:09:58,000 --> 00:10:03,000\nCrosses boundary\n\n"
+        "3\n00:10:15,500 --> 00:10:20,000\n<i>Part two</i> line\n",
+        encoding="utf-8",
+    )
+    cues = load_subtitle_cues(srt_path)
+    assert len(cues) == 3
+    assert cues[2].text == "Part two line"
+
+    # Part 2 starts at 600s (10m) and ends at 1200s (20m)
+    part2_cues = slice_cues_for_part(cues, part_start_sec=600.0, part_end_sec=1200.0)
+    assert len(part2_cues) == 2
+    assert part2_cues[0].start_sec == 0.0
+    assert part2_cues[0].end_sec == 3.0
+    assert part2_cues[1].start_sec == 15.5
+    assert part2_cues[1].end_sec == 20.0
+
+    assert find_active_cue_text(cues, 617.0) == "Part two line"
+
+    # WebVTT and ASS parsing
+    vtt_path = tmp_path / "movie.vtt"
+    vtt_path.write_text(
+        "WEBVTT\n\n00:01.000 --> 00:03.500 align:middle\nHello VTT\n",
+        encoding="utf-8",
+    )
+    vtt_cues = load_subtitle_cues(vtt_path)
+    assert len(vtt_cues) == 1
+    assert vtt_cues[0].text == "Hello VTT"
+
+    ass_path = tmp_path / "movie.ass"
+    ass_path.write_text(
+        "[Script Info]\nScriptType: v4.00+\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:02.00,0:00:05.00,Default,,0,0,0,,{\\b1}Hello\\NASS\n",
+        encoding="utf-8",
+    )
+    ass_cues = load_subtitle_cues(ass_path)
+    assert len(ass_cues) == 1
+    assert ass_cues[0].text == "Hello\nASS"
+
+
+def test_subtitle_preview_overlay_render() -> None:
+    geo = compute_layout_geometry(1920, 1080)
+    sub = SubtitleSettings(enabled=True, position="below_video", bg_box=True)
+    ov = render_subtitle_overlay("Testing subtitle line", sub, geo)
+    assert ov.size == (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+    assert ov.getbbox() is not None
+
+
+def test_end_to_end_ffmpeg_export_with_subtitles(tmp_path: Path) -> None:
+    ffmpeg = find_executable("ffmpeg")
+    ffprobe = find_executable("ffprobe")
+    src_video = tmp_path / "sample_sub.mp4"
+    srt_path = tmp_path / "sample.srt"
+    out_dir = tmp_path / "exports_sub"
+
+    gen_cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=duration=4:size=1280x720:rate=24",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=4",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        str(src_video),
+    ]
+    res = subprocess.run(gen_cmd, capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+    srt_path.write_text(
+        "1\n00:00:00,200 --> 00:00:01,800\nPart one subtitle\n\n"
+        "2\n00:00:02,200 --> 00:00:03,800\nPart two subtitle\n",
+        encoding="utf-8",
+    )
+
+    info = probe_video(src_video)
+    parts = calculate_parts(info.duration_sec, segment_duration_sec=2.0)
+    assert len(parts) == 2
+
+    exported = export_parts(
+        video_info=info,
+        parts=parts,
+        layout=LayoutSettings(background_mode="blur"),
+        badge=BadgeSettings(enabled=True, template="Part {n}"),
+        export_settings=ExportSettings(output_dir=out_dir, preset="ultrafast", crf=24),
+        subtitles=SubtitleSettings(
+            path=srt_path,
+            enabled=True,
+            mode="both",
+            position="below_video",
+            bg_box=True,
+        ),
+    )
+    assert len(exported) == 2
+    for part in exported:
+        assert part.status == "Done", part.error_message
+        assert part.output_path is not None and part.output_path.exists()
+        probe_res = subprocess.run(
+            [ffprobe, "-v", "error", "-show_streams", "-of", "json", str(part.output_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        streams = json.loads(probe_res.stdout)["streams"]
+        codec_types = [s["codec_type"] for s in streams]
+        assert "video" in codec_types
+        assert "audio" in codec_types
+        assert "subtitle" in codec_types
 
 
 def test_qt_main_window_smoke() -> None:

@@ -28,4 +28,7 @@ Or double-click `run.bat` on Windows.
 - **Part Indicator ("Which Part")**:
   - **In the App**: Interactive Parts Queue table (`Part 1`, time frame, duration, export status) + Live 9:16 preview showing the exact frame and badge for whichever part you click.
   - **In the Exported Video**: Crisp burned-in `"Part 1"` / `"Part 1 of N"` pill badge with customizable position, font size, colors, and opacity.
+- **Subtitle Merging (`.srt`, `.ass`, `.ssa`, `.vtt`)**:
+  - Automatically slices and shifts subtitle timestamps for each cut part so Part 2, Part 3, etc. stay perfectly synced.
+  - Supports **Burn-in** (visible on video), **Soft Track** (`mov_text` CC stream inside MP4), or **Both**, with live preview, position presets, font size, color, box background, and sync offset (`±s`).
 - **Selective & Fast Export**: Check/uncheck specific parts to export, real-time FFmpeg progress & speed readout, cancel support, and double-click finished rows to play.

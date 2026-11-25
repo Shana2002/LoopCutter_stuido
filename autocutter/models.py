@@ -10,6 +10,8 @@ OUTPUT_HEIGHT = 1280
 
 FitMode = Literal["cover", "contain", "stretch"]
 BackgroundMode = Literal["solid", "blur"]
+SubtitleMode = Literal["burn", "soft", "both"]
+SubtitlePosition = Literal["video_bottom", "below_video", "video_center", "bottom_area"]
 BadgePosition = Literal[
     "top_area",
     "above_video",
@@ -106,6 +108,26 @@ class BadgeSettings:
     border_width: int = 2
     corner_radius: int = 18
     margin: int = 20
+
+
+@dataclass(frozen=True)
+class SubtitleCue:
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass
+class SubtitleSettings:
+    path: Optional[Path] = None
+    enabled: bool = True
+    mode: SubtitleMode = "burn"
+    position: SubtitlePosition = "video_bottom"
+    font_size: int = 32
+    text_color: str = "#FFFFFF"
+    outline_color: str = "#000000"
+    bg_box: bool = False
+    time_offset_sec: float = 0.0
 
 
 @dataclass

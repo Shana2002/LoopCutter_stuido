@@ -15,6 +15,7 @@ from .models import (
     FitMode,
     LayoutGeometry,
     LayoutSettings,
+    SubtitleSettings,
     format_part_label,
 )
 
@@ -242,6 +243,97 @@ def _make_placeholder_video_frame(width: int, height: int) -> Image.Image:
     return img
 
 
+def _wrap_text_to_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+) -> list[str]:
+    lines: list[str] = []
+    for paragraph in text.splitlines():
+        words = paragraph.split()
+        if not words:
+            continue
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if (bbox[2] - bbox[0]) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    return lines
+
+
+def render_subtitle_overlay(
+    subtitle_text: str,
+    subtitle: SubtitleSettings,
+    geometry: LayoutGeometry,
+) -> Image.Image:
+    """Render wrapped subtitle text onto a 720x1280 RGBA overlay for live preview."""
+    overlay = Image.new("RGBA", (geometry.canvas_width, geometry.canvas_height), (0, 0, 0, 0))
+    if not subtitle.enabled or not subtitle_text.strip():
+        return overlay
+
+    draw = ImageDraw.Draw(overlay)
+    font = get_bold_font(subtitle.font_size)
+    max_w = geometry.canvas_width - 64
+    lines = _wrap_text_to_width(draw, subtitle_text, font, max_w)
+    if not lines:
+        return overlay
+
+    line_boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+    line_heights = [max(1, b[3] - b[1]) for b in line_boxes]
+    line_widths = [max(1, b[2] - b[0]) for b in line_boxes]
+    line_gap = max(6, int(round(subtitle.font_size * 0.25)))
+    total_h = sum(line_heights) + line_gap * (len(lines) - 1)
+    block_w = max(line_widths)
+
+    pos = subtitle.position
+    if pos == "below_video" and geometry.bottom_area_height >= 50:
+        top_y = geometry.bottom_area_y + 18
+    elif pos == "bottom_area" and geometry.bottom_area_height >= 50:
+        top_y = geometry.bottom_area_y + max(16, (geometry.bottom_area_height - total_h) // 2)
+    elif pos == "video_center":
+        top_y = geometry.video_y + max(8, (geometry.video_height - total_h) // 2)
+    else:
+        # video_bottom
+        top_y = geometry.bottom_area_y - total_h - 18
+
+    top_y = max(12, min(geometry.canvas_height - total_h - 12, top_y))
+
+    text_rgba = parse_hex_color(subtitle.text_color, alpha=255)
+    outline_rgba = parse_hex_color(subtitle.outline_color, alpha=255)
+
+    if subtitle.bg_box:
+        pad_x, pad_y = 16, 10
+        bx = (geometry.canvas_width - block_w) // 2 - pad_x
+        by = top_y - pad_y
+        bw = block_w + pad_x * 2
+        bh = total_h + pad_y * 2
+        box_rgba = parse_hex_color(subtitle.outline_color, alpha=175)
+        draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=10, fill=box_rgba)
+
+    cur_y = top_y
+    stroke_w = 0 if subtitle.bg_box else max(2, subtitle.font_size // 12)
+    for ln, bbox, lw, lh in zip(lines, line_boxes, line_widths, line_heights):
+        tx = (geometry.canvas_width - lw) / 2.0 - bbox[0]
+        ty = cur_y - bbox[1]
+        draw.text(
+            (tx, ty),
+            ln,
+            font=font,
+            fill=text_rgba,
+            stroke_width=stroke_w,
+            stroke_fill=outline_rgba if stroke_w > 0 else None,
+        )
+        cur_y += lh + line_gap
+
+    return overlay
+
+
 def render_preview_frame(
     frame_png_bytes: Optional[bytes],
     geometry: LayoutGeometry,
@@ -249,6 +341,8 @@ def render_preview_frame(
     badge: BadgeSettings,
     part_num: int = 1,
     total_parts: int = 1,
+    subtitle_text: Optional[str] = None,
+    subtitle_settings: Optional[SubtitleSettings] = None,
 ) -> Image.Image:
     """Compose a full 720x1280 preview image matching the final FFmpeg export."""
     if frame_png_bytes:
@@ -320,7 +414,12 @@ def render_preview_frame(
     if bottom_img is not None:
         canvas.paste(bottom_img, (0, geometry.bottom_area_y), bottom_img)
 
-    # 5. Part badge overlay
+    # 5. Subtitle preview overlay
+    if subtitle_settings and subtitle_settings.enabled and subtitle_text:
+        sub_layer = render_subtitle_overlay(subtitle_text, subtitle_settings, geometry)
+        canvas = Image.alpha_composite(canvas, sub_layer)
+
+    # 6. Part badge overlay
     if badge.enabled:
         badge_layer = render_badge_overlay(part_num, total_parts, badge, geometry)
         canvas = Image.alpha_composite(canvas, badge_layer)

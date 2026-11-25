@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -49,6 +50,8 @@ from ..models import (
     FitMode,
     LayoutSettings,
     PartSegment,
+    SubtitleCue,
+    SubtitleSettings,
     VideoInfo,
     calculate_parts,
     compute_layout_geometry,
@@ -56,10 +59,12 @@ from ..models import (
     format_part_label,
     format_timestamp,
 )
+from ..subtitles import find_active_cue_text, load_subtitle_cues
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts", ".flv"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 
 
 STYLESHEET = """
@@ -263,6 +268,7 @@ class ExportWorker(QThread):
         layout: LayoutSettings,
         badge: BadgeSettings,
         export_settings: ExportSettings,
+        subtitles: Optional[SubtitleSettings] = None,
     ) -> None:
         super().__init__()
         self.video_info = video_info
@@ -270,6 +276,7 @@ class ExportWorker(QThread):
         self.layout = layout
         self.badge = badge
         self.export_settings = export_settings
+        self.subtitles = subtitles
         self.cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -283,6 +290,7 @@ class ExportWorker(QThread):
                 layout=self.layout,
                 badge=self.badge,
                 export_settings=self.export_settings,
+                subtitles=self.subtitles,
                 cancel_event=self.cancel_event,
                 on_part_start=lambda part, out_p: self.part_started.emit(part.index, str(out_p)),
                 on_part_progress=lambda part, frac, spd: self.part_progress.emit(
@@ -391,6 +399,8 @@ class MainWindow(QMainWindow):
 
         self.top_image_path: Optional[Path] = None
         self.bottom_image_path: Optional[Path] = None
+        self.subtitle_path: Optional[Path] = None
+        self.subtitle_cues: list[SubtitleCue] = []
 
         self._frame_debounce_timer = QTimer(self)
         self._frame_debounce_timer.setSingleShot(True)
@@ -439,6 +449,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._build_timeframe_group())
         left_layout.addWidget(self._build_images_layout_group())
         left_layout.addWidget(self._build_badge_group())
+        left_layout.addWidget(self._build_subtitles_group())
         left_layout.addWidget(self._build_export_settings_group())
         left_layout.addStretch(1)
         left_scroll.setWidget(left_container)
@@ -681,8 +692,86 @@ class MainWindow(QMainWindow):
         lay.addLayout(grid)
         return box
 
+    def _build_subtitles_group(self) -> QGroupBox:
+        box = QGroupBox("5. Subtitles (Merge to Video)")
+        lay = QVBoxLayout(box)
+        lay.setSpacing(6)
+
+        row = QHBoxLayout()
+        self.sub_path_edit = QLineEdit()
+        self.sub_path_edit.setReadOnly(True)
+        self.sub_path_edit.setPlaceholderText("Optional: Drop or select .srt / .ass / .vtt")
+        sub_browse = QPushButton("Browse")
+        sub_browse.clicked.connect(self._browse_subtitle)
+        sub_clear = QPushButton("✕")
+        sub_clear.setFixedWidth(30)
+        sub_clear.clicked.connect(self._clear_subtitle)
+        row.addWidget(self.sub_path_edit, 1)
+        row.addWidget(sub_browse)
+        row.addWidget(sub_clear)
+        lay.addLayout(row)
+
+        self.sub_info_lbl = QLabel("No subtitle file · Automatically synced & sliced per part")
+        self.sub_info_lbl.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        lay.addWidget(self.sub_info_lbl)
+
+        self.sub_enabled_chk = QCheckBox("Merge subtitles into exported parts")
+        self.sub_enabled_chk.setChecked(True)
+        self.sub_enabled_chk.toggled.connect(self._refresh_preview)
+        lay.addWidget(self.sub_enabled_chk)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Merge Mode:"), 0, 0)
+        self.sub_mode_combo = QComboBox()
+        self.sub_mode_combo.addItem("Burn-in (Visible on Video)", "burn")
+        self.sub_mode_combo.addItem("Soft Track (MP4 CC Stream)", "soft")
+        self.sub_mode_combo.addItem("Both (Burn-in + Soft Track)", "both")
+        self.sub_mode_combo.currentIndexChanged.connect(self._refresh_preview)
+        grid.addWidget(self.sub_mode_combo, 0, 1, 1, 2)
+
+        grid.addWidget(QLabel("Position:"), 1, 0)
+        self.sub_pos_combo = QComboBox()
+        self.sub_pos_combo.addItem("On Video Bottom", "video_bottom")
+        self.sub_pos_combo.addItem("Below Video", "below_video")
+        self.sub_pos_combo.addItem("Video Center", "video_center")
+        self.sub_pos_combo.addItem("Bottom Area Center", "bottom_area")
+        self.sub_pos_combo.currentIndexChanged.connect(self._refresh_preview)
+        grid.addWidget(self.sub_pos_combo, 1, 1, 1, 2)
+
+        grid.addWidget(QLabel("Font & Sync:"), 2, 0)
+        self.sub_size_spin = QSpinBox()
+        self.sub_size_spin.setRange(16, 64)
+        self.sub_size_spin.setValue(32)
+        self.sub_size_spin.setSuffix(" px")
+        self.sub_size_spin.valueChanged.connect(self._refresh_preview)
+        grid.addWidget(self.sub_size_spin, 2, 1)
+
+        self.sub_offset_spin = QDoubleSpinBox()
+        self.sub_offset_spin.setRange(-120.0, 120.0)
+        self.sub_offset_spin.setSingleStep(0.5)
+        self.sub_offset_spin.setValue(0.0)
+        self.sub_offset_spin.setSuffix(" s")
+        self.sub_offset_spin.setToolTip("Shift subtitle timing (+/- seconds)")
+        self.sub_offset_spin.valueChanged.connect(self._refresh_preview)
+        grid.addWidget(self.sub_offset_spin, 2, 2)
+
+        grid.addWidget(QLabel("Style:"), 3, 0)
+        self.sub_fg_btn = ColorSwatchButton("#FFFFFF")
+        self.sub_fg_btn.color_changed.connect(lambda _c: self._refresh_preview())
+        self.sub_outline_btn = ColorSwatchButton("#000000")
+        self.sub_outline_btn.color_changed.connect(lambda _c: self._refresh_preview())
+        grid.addWidget(self.sub_fg_btn, 3, 1)
+        grid.addWidget(self.sub_outline_btn, 3, 2)
+
+        self.sub_box_chk = QCheckBox("Opaque background box behind text")
+        self.sub_box_chk.toggled.connect(self._refresh_preview)
+        grid.addWidget(self.sub_box_chk, 4, 0, 1, 3)
+
+        lay.addLayout(grid)
+        return box
+
     def _build_export_settings_group(self) -> QGroupBox:
-        box = QGroupBox("5. 720p (720×1280) Export Settings")
+        box = QGroupBox("6. 720p (720×1280) Export Settings")
         lay = QVBoxLayout(box)
         lay.setSpacing(6)
 
@@ -856,6 +945,9 @@ class MainWindow(QMainWindow):
             if ext in VIDEO_EXTENSIONS:
                 self._load_video(local)
                 break
+            if ext in SUBTITLE_EXTENSIONS:
+                self._load_subtitle(local)
+                continue
             if ext in IMAGE_EXTENSIONS:
                 if self.top_image_path is None:
                     self._set_image("top", local)
@@ -953,6 +1045,41 @@ class MainWindow(QMainWindow):
         if chosen:
             self.out_dir_edit.setText(chosen)
 
+    def _browse_subtitle(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Subtitle File",
+            "",
+            "Subtitle Files (*.srt *.ass *.ssa *.vtt);;All Files (*.*)",
+        )
+        if file_path:
+            self._load_subtitle(Path(file_path))
+
+    def _load_subtitle(self, path: Path) -> None:
+        try:
+            cues = load_subtitle_cues(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Subtitle Error", f"Could not load subtitles:\n{exc}")
+            return
+        self.subtitle_path = path
+        self.subtitle_cues = cues
+        self.sub_path_edit.setText(path.name)
+        self.sub_path_edit.setToolTip(str(path))
+        self.sub_info_lbl.setText(
+            f"Loaded {len(cues)} subtitle lines from {path.name}"
+            if cues
+            else f"Loaded {path.name} (0 subtitle lines found)"
+        )
+        self._refresh_preview()
+
+    def _clear_subtitle(self) -> None:
+        self.subtitle_path = None
+        self.subtitle_cues = []
+        self.sub_path_edit.clear()
+        self.sub_path_edit.setToolTip("")
+        self.sub_info_lbl.setText("No subtitle file · Automatically synced & sliced per part")
+        self._refresh_preview()
+
     # --------------------------------------------------------- Settings Gathering
     def _current_layout_settings(self) -> LayoutSettings:
         return LayoutSettings(
@@ -975,6 +1102,19 @@ class MainWindow(QMainWindow):
             text_color=self.badge_fg_btn.hex_color,
             bg_color=self.badge_bg_btn.hex_color,
             bg_opacity=self.badge_opacity_spin.value() / 100.0,
+        )
+
+    def _current_subtitle_settings(self) -> SubtitleSettings:
+        return SubtitleSettings(
+            path=self.subtitle_path,
+            enabled=self.sub_enabled_chk.isChecked() and self.subtitle_path is not None,
+            mode=self.sub_mode_combo.currentData(),
+            position=self.sub_pos_combo.currentData(),
+            font_size=self.sub_size_spin.value(),
+            text_color=self.sub_fg_btn.hex_color,
+            outline_color=self.sub_outline_btn.hex_color,
+            bg_box=self.sub_box_chk.isChecked(),
+            time_offset_sec=self.sub_offset_spin.value(),
         )
 
     def _current_export_settings(self) -> ExportSettings:
@@ -1194,15 +1334,29 @@ class MainWindow(QMainWindow):
                 f"Previewing: {format_part_label(badge.template, part_num, total_parts)} "
                 f"({format_timestamp(part.start_sec)} – {format_timestamp(part.end_sec)})"
             )
+            preview_ts = part.start_sec + part.duration_sec * (self.scrub_slider.value() / 100.0)
         else:
             part_num = 1
             total_parts = 12
             self.preview_part_lbl.setText("Live 9:16 Preview (720×1280 · 720p)")
+            preview_ts = 0.0
 
         self.preview_geo_lbl.setText(
             f"720×1280 · Video {geo.video_width}×{geo.video_height} · "
             f"Top {geo.top_area_height}px · Bottom {geo.bottom_area_height}px"
         )
+
+        sub_settings = self._current_subtitle_settings()
+        sub_text = ""
+        if sub_settings.enabled and self.subtitle_cues:
+            if self.video_info is not None:
+                sub_text = find_active_cue_text(
+                    self.subtitle_cues,
+                    preview_ts,
+                    sync_offset_sec=sub_settings.time_offset_sec,
+                )
+            if not sub_text and self.video_info is None:
+                sub_text = self.subtitle_cues[0].text
 
         img = render_preview_frame(
             frame_png_bytes=self.current_frame_bytes,
@@ -1211,6 +1365,8 @@ class MainWindow(QMainWindow):
             badge=badge,
             part_num=part_num,
             total_parts=total_parts,
+            subtitle_text=sub_text,
+            subtitle_settings=sub_settings,
         )
         self.preview_widget.set_preview_image(img)
 
@@ -1225,6 +1381,7 @@ class MainWindow(QMainWindow):
 
         layout = self._current_layout_settings()
         badge = self._current_badge_settings()
+        subtitles = self._current_subtitle_settings()
         export_settings = self._current_export_settings()
 
         # Reset statuses on selected rows
@@ -1247,6 +1404,7 @@ class MainWindow(QMainWindow):
             layout=layout,
             badge=badge,
             export_settings=export_settings,
+            subtitles=subtitles,
         )
         self.export_worker.part_started.connect(self._on_export_part_started)
         self.export_worker.part_progress.connect(self._on_export_part_progress)
