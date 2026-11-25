@@ -1,4 +1,4 @@
-# AutoCutter Studio
+# LoopCutter Studio
 
 Desktop application that takes a landscape video (e.g., a full movie), cuts it into timed parts (e.g., 10-minute shorts), converts each part to **720p vertical 9:16 (`720×1280`)**, adds custom **top and bottom images**, and displays **which part is in the video** both inside the app's parts queue/preview and as a customizable burned-in `"Part X"` badge on the exported video.
 

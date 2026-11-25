@@ -350,6 +350,6 @@ def test_qt_main_window_smoke() -> None:
 
     app = QApplication.instance() or QApplication([])
     win = MainWindow()
-    assert win.windowTitle().startswith("AutoCutter Studio")
+    assert win.windowTitle().startswith("LoopCutter Studio")
     win.close()
     app.processEvents()

@@ -383,7 +383,7 @@ class ColorSwatchButton(QPushButton):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("AutoCutter Studio — Landscape to 720p 9:16 Shorts Splitter")
+        self.setWindowTitle("LoopCutter Studio — Landscape to 720p 9:16 Shorts Splitter")
         self.resize(1420, 880)
         self.setAcceptDrops(True)
         self.setStyleSheet(STYLESHEET)
@@ -420,7 +420,7 @@ class MainWindow(QMainWindow):
 
         # Top header bar
         header = QHBoxLayout()
-        title_lbl = QLabel("AutoCutter Studio")
+        title_lbl = QLabel("LoopCutter Studio")
         title_lbl.setStyleSheet("font-size: 18px; font-weight: 700; color: #F8FAFC;")
         subtitle_lbl = QLabel(
             "Cut landscape movies into timed parts · Convert to 720×1280 (9:16 720p) · Top/Bottom images · Burn-in Part Labels"

@@ -259,7 +259,7 @@ def export_parts(
                 f"(mode: {subtitles.mode})"
             )
 
-    with tempfile.TemporaryDirectory(prefix="autocutter_") as tmp_dir_str:
+    with tempfile.TemporaryDirectory(prefix="loopcutter_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
 
         # Pre-render static top and bottom zone images once for all parts

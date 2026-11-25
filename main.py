@@ -13,7 +13,7 @@ def main() -> int:
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("AutoCutter Studio")
+    app.setApplicationName("LoopCutter Studio")
     window = MainWindow()
     window.show()
     return app.exec_()
